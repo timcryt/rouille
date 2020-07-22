@@ -66,6 +66,17 @@ impl From<io::Error> for SendError {
     }
 }
 
+/// Error that can happing when receiving message from websocket/
+#[derive(Debug)]
+pub enum WebsocketRecvError {
+    /// Websocket queue is empty/
+    Empty,
+    /// Websocket connection is closed/
+    SocketClosed,
+    /// Failed to receive message from websocket or it has invalid format/
+    IOError,
+}
+
 impl Websocket {
     /// Sends text data over the websocket.
     ///
@@ -106,39 +117,16 @@ impl Websocket {
         self.socket.is_none()
     }
 
-    // TODO: give access to close reason
-}
-
-impl Upgrade for Sender<Websocket> {
-    fn build(&mut self, socket: Box<dyn ReadWrite + Send>) {
-        let websocket = Websocket {
-            socket: Some(socket),
-            state_machine: low_level::StateMachine::new(),
-            current_message_binary: false,
-            current_message_payload: Vec::new(),
-            current_frame_opcode: 0,
-            current_frame_fin: false,
-            current_frame_payload: Vec::new(),
-            messages_in_queue: Vec::new(),
-        };
-
-        let _ = self.send(websocket);
-    }
-}
-
-impl Iterator for Websocket {
-    type Item = Message;
-
-    fn next(&mut self) -> Option<Message> {
-        loop {
+    /// Trying to recieve data from websocket
+    pub fn try_recv(&mut self) -> Result<Message, WebsocketRecvError> {
             // If the socket is `None`, the connection has been closed.
             if self.socket.is_none() {
-                return None;
+                return Err(WebsocketRecvError::SocketClosed);
             }
 
             // There may be some messages waiting to be processed.
             if !self.messages_in_queue.is_empty() {
-                return Some(self.messages_in_queue.remove(0));
+                return Ok(self.messages_in_queue.remove(0));
             }
 
             // Read `n` bytes in `buf`.
@@ -147,13 +135,13 @@ impl Iterator for Websocket {
                 Ok(n) if n == 0 => {
                     // Read returning zero means EOF
                     self.socket = None;
-                    return None;
+                    return Err(WebsocketRecvError::SocketClosed);
                 }
                 Ok(n) => n,
                 Err(ref err) if err.kind() == io::ErrorKind::Interrupted => 0,
                 Err(_) => {
                     self.socket = None;
-                    return None;
+                    return Err(WebsocketRecvError::IOError);
                 },
             };
 
@@ -192,7 +180,7 @@ impl Iterator for Websocket {
                                                     let _ = send(b"1007 Invalid UTF-8 encoding",
                                                                  Write::by_ref(self.socket.as_mut().unwrap()), 0x8);
                                                     self.socket = None;
-                                                    return None;
+                                                    return Err(WebsocketRecvError::SocketClosed);
                                                 },
                                             };
 
@@ -209,7 +197,7 @@ impl Iterator for Websocket {
                                         let _ = send(b"1002 Expected continuation frame",
                                                      Write::by_ref(self.socket.as_mut().unwrap()), 0x8);
                                         self.socket = None;
-                                        return None;
+                                        return Err(WebsocketRecvError::IOError);
                                     }
 
                                     if self.current_frame_fin {
@@ -224,7 +212,7 @@ impl Iterator for Websocket {
                                                              Write::by_ref(self.socket.as_mut().unwrap()),
                                                              0x8);
                                                 self.socket = None;
-                                                return None;
+                                                return Err(WebsocketRecvError::IOError);
                                             },
                                         };
 
@@ -245,7 +233,7 @@ impl Iterator for Websocket {
                                         let _ = send(b"1002 Expected continuation frame",
                                                      Write::by_ref(self.socket.as_mut().unwrap()), 0x8);
                                         self.socket = None;
-                                        return None;
+                                        return Err(WebsocketRecvError::IOError);
                                     }
 
                                     if self.current_frame_fin {
@@ -268,7 +256,7 @@ impl Iterator for Websocket {
                                     // the server is considered dead as soon as it sends the
                                     // confirmation, we have no risk of losing packets.
                                     self.socket = None;
-                                    return None;
+                                    return Err(WebsocketRecvError::SocketClosed);
                                 },
 
                                 // Ping.
@@ -286,7 +274,7 @@ impl Iterator for Websocket {
                                     let _ = send(b"Unknown opcode",
                                                  Write::by_ref(self.socket.as_mut().unwrap()), 0x8);
                                     self.socket = None;
-                                    return None;
+                                    return Err(WebsocketRecvError::IOError);
                                 },
                             }
 
@@ -298,9 +286,41 @@ impl Iterator for Websocket {
                         // The low level layer signaled an error. Sending it to client and closing.
                         let _ = send(desc.as_bytes(), Write::by_ref(self.socket.as_mut().unwrap()), 0x8);
                         self.socket = None;
-                        return None;
+                        return Err(WebsocketRecvError::IOError);
                     },
                 }
+            }
+        Err(WebsocketRecvError::Empty)
+    }
+    // TODO: give access to close reason
+}
+
+impl Upgrade for Sender<Websocket> {
+    fn build(&mut self, socket: Box<dyn ReadWrite + Send>) {
+        let websocket = Websocket {
+            socket: Some(socket),
+            state_machine: low_level::StateMachine::new(),
+            current_message_binary: false,
+            current_message_payload: Vec::new(),
+            current_frame_opcode: 0,
+            current_frame_fin: false,
+            current_frame_payload: Vec::new(),
+            messages_in_queue: Vec::new(),
+        };
+
+        let _ = self.send(websocket);
+    }
+}
+
+impl Iterator for Websocket {
+    type Item = Message;
+
+    fn next(&mut self) -> Option<Message> {
+        loop {
+            match self.try_recv() {
+                Ok(msg) => return Some(msg),
+                Err(WebsocketRecvError::Empty) => (),
+                _ => return None,
             }
         }
     }
