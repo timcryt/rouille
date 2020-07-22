@@ -68,6 +68,7 @@
 pub use self::websocket::Message;
 pub use self::websocket::SendError;
 pub use self::websocket::Websocket;
+pub use self::websocket::WebsocketRecvError;
 
 use base64;
 use std::borrow::Cow;
